@@ -8,11 +8,19 @@ from easyocr import Reader
 from PIL import Image
 from shapely.geometry import Polygon, Point
 
+import easyocr
+
 st.set_page_config(layout="wide")
 st.title("🧠 Plot Image Matcher + Text Extractor")
 
-# Load EasyOCR reader (English, no GPU)
-reader = Reader(['en'], gpu=False)
+
+
+st.set_page_config(layout="wide")
+st.title("🧠 Plot Image Matcher + Text Extractor")
+
+# Add this to let the user know what’s happening
+with st.spinner("📦 Initializing OCR engine... this may take 1–2 minutes on first load"):
+    reader = easyocr.Reader(['en'], gpu=False)
 
 def extract_images_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
