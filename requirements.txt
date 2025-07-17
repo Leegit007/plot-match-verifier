@@ -1,6 +1,6 @@
-
 streamlit
+numpy
+opencv-python-headless
+Pillow
 PyMuPDF
 easyocr
-Pillow
-numpy
