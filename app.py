@@ -1,91 +1,93 @@
 import streamlit as st
-from PIL import Image
+import fitz  # PyMuPDF
 import numpy as np
 import cv2
-import fitz  # PyMuPDF
-import easyocr
+import os
 import tempfile
+from easyocr import Reader
+from PIL import Image
+from shapely.geometry import Polygon, Point
 
 st.set_page_config(layout="wide")
-st.title("🧭 Plot to Master Plan Verifier")
+st.title("🧠 Plot Image Matcher + Text Extractor")
 
-# Initialize OCR reader once
-reader = easyocr.Reader(['en'], gpu=False)
+# Load EasyOCR reader (English, no GPU)
+reader = Reader(['en'], gpu=False)
 
-def extract_plots_from_pdf(pdf_file):
-    extracted_plots = []
-    pdf_bytes = pdf_file.read()
-    doc = fitz.open("pdf", pdf_bytes)
+def extract_images_from_pdf(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    images = []
+    for i in range(len(doc)):
+        pix = doc[i].get_pixmap(dpi=300)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        images.append(np.array(img))
+    return images
 
-    for page_num in range(len(doc)):
-        page = doc.load_page(page_num)
-        pix = page.get_pixmap(dpi=300)
-        img_bytes = pix.tobytes("png")
-        img_np = np.frombuffer(img_bytes, dtype=np.uint8)
-        img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+def detect_polygon_from_dark_lines(image):
+    """Detect polygon from contours (assumes dark lines)."""
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    polygons = []
+    for cnt in contours:
+        epsilon = 0.02 * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        if len(approx) >= 4 and cv2.contourArea(approx) > 10000:
+            polygons.append(approx.reshape(-1, 2))
+    return polygons
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+def is_polygon_inside(big_poly, small_poly):
+    big = Polygon(big_poly)
+    small = Polygon(small_poly)
+    return big.contains(small)
 
-        thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 21, 15
-        )
+def extract_text_from_polygon(image, polygon):
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [np.array(polygon)], 255)
+    masked_img = cv2.bitwise_and(image, image, mask=mask)
+    bounds_text = reader.readtext(masked_img, detail=0)
+    return " ".join(bounds_text)
 
-        kernel = np.ones((5, 5), np.uint8)
-        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+# MAIN APP
+with st.sidebar:
+    plot_pdf = st.file_uploader("📄 Upload Plot Image PDF", type=["pdf"])
+    master_pdf = st.file_uploader("🗺️ Upload Master Plan PDF", type=["pdf"])
 
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+if plot_pdf and master_pdf:
+    with st.spinner("🔍 Processing files..."):
+        plot_images = extract_images_from_pdf(plot_pdf.read())
+        master_img = extract_images_from_pdf(master_pdf.read())[0]  # Assume one page
 
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < 10000:
-                continue
+        # Detect master polygons once
+        master_polygons = detect_polygon_from_dark_lines(master_img)
 
-            x, y, w, h = cv2.boundingRect(cnt)
-            pad = 10
-            x = max(x - pad, 0)
-            y = max(y - pad, 0)
-            w = min(w + 2*pad, img.shape[1] - x)
-            h = min(h + 2*pad, img.shape[0] - y)
+        results = []
 
-            plot_crop = img[y:y+h, x:x+w]
-            pil_img = Image.fromarray(cv2.cvtColor(plot_crop, cv2.COLOR_BGR2RGB))
-            extracted_plots.append(pil_img)
+        # Create a temp folder if not exist
+        os.makedirs("temp", exist_ok=True)
 
-    return extracted_plots
+        for idx, plot_img in enumerate(plot_images):
+            temp_path = f"temp/plot_{idx}.png"
+            cv2.imwrite(temp_path, cv2.cvtColor(plot_img, cv2.COLOR_RGB2BGR))
 
-def perform_ocr_on_image(image):
-    image_np = np.array(image)
-    result = reader.readtext(image_np, detail=0)
-    return result
+            plot_polygons = detect_polygon_from_dark_lines(plot_img)
 
-# Upload section
-st.sidebar.header("📤 Upload Files")
-multi_plot_pdf = st.sidebar.file_uploader("Upload Multi-Plot PDF", type=["pdf"])
-master_plan_pdf = st.sidebar.file_uploader("Upload Master Plan PDF", type=["pdf"])
+            matched = False
+            for pp in plot_polygons:
+                for mp in master_polygons:
+                    if is_polygon_inside(mp, pp):
+                        text = extract_text_from_polygon(master_img, mp)
+                        results.append((plot_img, text))
+                        matched = True
+                        break
+                if matched:
+                    break
 
-if multi_plot_pdf and master_plan_pdf:
-    with st.spinner("🔍 Extracting plots..."):
-        try:
-            plots = extract_plots_from_pdf(multi_plot_pdf)
-            st.success(f"✅ Extracted {len(plots)} plots.")
-        except Exception as e:
-            st.error(f"❌ Error extracting plots: {e}")
-            plots = []
+            os.remove(temp_path)
 
-    if plots:
-        st.subheader("📍 Extracted Plot Images")
-        for idx, img in enumerate(plots):
-            col1, col2 = st.columns([1, 3])
-            with col1:
-                st.image(img, caption=f"Plot #{idx+1}", use_column_width=True)
-            with col2:
-                try:
-                    text = perform_ocr_on_image(img)
-                    st.markdown("**Detected Text:**")
-                    st.write(", ".join(text) if text else "_No text found_")
-                except Exception as e:
-                    st.warning(f"OCR failed: {e}")
-
-        st.info("🧠 GPT-4 call to compare with master plan is currently **disabled**.\n"
-                "This app shows how plots are extracted and OCR-ed for now.")
+    # Show results
+    st.subheader("✅ Matched Plots + Extracted Text")
+    for img, text in results:
+        st.image(img, caption="Matched Plot", use_column_width=True)
+        st.info(f"📌 Extracted Text: {text}")
